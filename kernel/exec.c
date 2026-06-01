@@ -30,6 +30,7 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
+  int usyscall_mapped = 0;
 
   begin_op();
 
@@ -86,6 +87,25 @@ exec(char *path, char **argv)
   uvmclear(pagetable, sz-2*PGSIZE);
   sp = sz;
   stackbase = sp - PGSIZE;
+  
+  // 上限检查
+  if(PGROUNDUP(sz) >= USER_TOP)
+    goto bad;
+    
+  // 如果内核页表还指向旧物理页，会形成悬空映射。
+  // 全部清掉旧映射，然后根据新页表重新建立。
+  kvmdealloc(p->kpagetable, p->sz, 0);
+  u2kvmcopy(pagetable, p->kpagetable, 0, sz); 
+  
+  if(p->usyscall){
+    p->usyscall->pid = p->pid;   // 更新 pid（保险，虽然 exec 不改 pid）
+    
+    // 把旧物理页映射到新页表的 USYSCALL 地址
+    if(mappages(pagetable, USYSCALL, PGSIZE,
+                (uint64)p->usyscall, PTE_R | PTE_U) < 0)
+      goto bad;
+    usyscall_mapped = 1;
+  }
 
   // Push argument strings, prepare rest of stack in ustack.
   for(argc = 0; argv[argc]; argc++) {
@@ -126,13 +146,24 @@ exec(char *path, char **argv)
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
+  
+  // 解除旧页表的 USYSCALL 映射
+  if(p->usyscall && usyscall_mapped){
+    uvmunmap(oldpagetable, USYSCALL, 1, 0);
+  }
+  
   proc_freepagetable(oldpagetable, oldsz);
 
+  // 打印页表
+  if(p->pid==1) vmprint(p->pagetable);
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
-  if(pagetable)
+  if(pagetable){
+    if(usyscall_mapped)
+      uvmunmap(pagetable, USYSCALL, 1, 0);
     proc_freepagetable(pagetable, sz);
+  }
   if(ip){
     iunlockput(ip);
     end_op();

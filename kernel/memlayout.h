@@ -44,6 +44,7 @@
 #define PLIC_SPRIORITY(hart) (PLIC + 0x201000 + (hart)*0x2000)
 #define PLIC_MCLAIM(hart) (PLIC + 0x200004 + (hart)*0x2000)
 #define PLIC_SCLAIM(hart) (PLIC + 0x201004 + (hart)*0x2000)
+#define USER_TOP 0x80000000L
 
 // the kernel expects there to be RAM
 // for use by the kernel and user pages

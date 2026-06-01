@@ -139,6 +139,43 @@ found:
     release(&p->lock);
     return 0;
   }
+  
+  if((p->usyscall = (struct usyscall *)kalloc()) == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  p->usyscall->pid = p->pid;
+
+  // 映射到用户页表的 USYSCALL 地址，用户只读
+  if(mappages(p->pagetable, USYSCALL, PGSIZE,
+              (uint64)p->usyscall, PTE_R | PTE_U) < 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  
+  // 仿照空用户页表的方式创建空内核页表
+  p->kpagetable = proc_kpagetable_init();
+  if(p->kpagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 分配内核栈的物理页
+  char *pa = kalloc();
+  if (pa == 0) {
+    freeproc(p);
+    return 0;
+  }
+  p->kstack = (uint64)pa;
+
+  // 映射该进程的内核栈到固定虚拟地址
+  uint64 kstack_va = KSTACK((int) (p - proc));
+  uint64 kstack_pa = p->kstack;
+  // 映射到进程自己的内核页表中
+  kvmmap(p->kpagetable, kstack_va, kstack_pa, PGSIZE, PTE_R | PTE_W);
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -158,9 +195,36 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  
+  // 先解除 USYSCALL映射,再释放页表
+  if(p->pagetable && p->usyscall){
+    uvmunmap(p->pagetable, USYSCALL, 1, 0);  // 只清 PTE，不释放物理页
+  }
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+
+  // 释放 USYSCALL物理页
+  if(p->usyscall){
+    kfree((void*)p->usyscall);
+    p->usyscall = 0;
+  }
+  
+  // 释放内核栈的物理页
+  if(p->kstack)
+    kfree((void*)p->kstack);
+  p->kstack = 0;
+
+  if(p->kpagetable && p->sz > 0)
+    kvmdealloc(p->kpagetable, p->sz, 0);
+
+  // 释放内核页表树
+  if(p->kpagetable)
+    proc_free_kpagetable(p->kpagetable);
+  p->kpagetable = 0;
+
+  
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -170,6 +234,25 @@ freeproc(struct proc *p)
   p->xstate = 0;
   p->state = UNUSED;
 }
+
+// 释放进程的内核页表
+// 只释放页表页,不释放叶子映射的物理页,这些资源不为进程所独占
+void
+proc_free_kpagetable(pagetable_t pagetable)
+{
+  for(int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      uint64 child = PTE2PA(pte);
+      proc_free_kpagetable((pagetable_t)child);
+      pagetable[i] = 0;
+    } else if(pte & PTE_V) {
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable);
+}
+
 
 // Create a user page table for a given process, with no user memory,
 // but with trampoline and trapframe pages.
@@ -241,6 +324,8 @@ userinit(void)
   // and data into it.
   uvmfirst(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  
+  u2kvmcopy(p->pagetable, p->kpagetable, 0, p->sz);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -260,19 +345,35 @@ int
 growproc(int n)
 {
   uint64 sz;
+  uint64 oldsz; 
   struct proc *p = myproc();
 
   sz = p->sz;
+  oldsz = sz; 
+  
   if(n > 0){
+    //上限检查
+    if(PGROUNDUP(sz + n) >= USER_TOP){
+      return -1;
+    }
+    
     if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
       return -1;
     }
+    
+    u2kvmcopy(p->pagetable, p->kpagetable, oldsz, sz);
+    
   } else if(n < 0){
+    //先清影子映射,再释放物理页
+    kvmdealloc(p->kpagetable, sz, sz + n);
+    
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
+  
   p->sz = sz;
   return 0;
 }
+
 
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
@@ -295,6 +396,8 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  
+  u2kvmcopy(np->pagetable, np->kpagetable, 0, np->sz);
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -462,7 +565,15 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        
+        w_satp(MAKE_SATP(p->kpagetable));
+        // wait for any previous writes to the page table memory to finish.
+        sfence_vma();
+
         swtch(&c->context, &p->context);
+
+        // 最后切换回全局内核页表
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
