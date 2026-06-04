@@ -57,6 +57,7 @@ sys_sleep(void)
   argint(0, &n);
   if(n < 0)
     n = 0;
+  backtrace();
   acquire(&tickslock);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
@@ -90,4 +91,41 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+// sigalarm 系统调用：设置 alarm 间隔和 handler
+uint64
+sys_sigalarm(void)
+{
+  int n;
+  uint64 fn;
+
+  argint(0, &n);
+  argaddr(1, &fn); 
+
+  struct proc *p = myproc();
+  
+  // 设置alarm参数
+  p->alarm_interval = n;
+  p->alarm_handler = (void(*)())fn;
+  p->alarm_ticks = n;
+  p->alarm_goingoff = 0;
+  
+  return 0;
+}
+
+// sigreturn 系统调用：恢复被中断的程序现场
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  
+  // 恢复所有寄存器回到中断前的状态
+  *p->trapframe = *p->alarm_trapframe;
+  
+  // 标记handler已返回,允许下一次alarm触发
+  p->alarm_goingoff = 0;
+  
+  // 返回原来保存的 a0 值
+  return p->alarm_trapframe->a0;
 }

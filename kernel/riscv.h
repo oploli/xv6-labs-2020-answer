@@ -327,6 +327,17 @@ sfence_vma()
   asm volatile("sfence.vma zero, zero");
 }
 
+// 读取 s0寄存器的值
+// GCC编译器将当前执行函数的帧指针保存在 s0寄存器中
+static inline uint64
+r_fp()
+{
+  uint64 x;
+  // 将 s0 寄存器的值移动到变量 x中
+  asm volatile("mv %0, s0" : "=r" (x) );
+  return x;
+}
+
 typedef uint64 pte_t;
 typedef uint64 *pagetable_t; // 512 PTEs
 

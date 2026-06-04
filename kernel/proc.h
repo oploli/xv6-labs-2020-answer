@@ -100,6 +100,13 @@ struct proc {
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
+  
+  int alarm_interval;                 // alarm间隔 tick 数，0 表示禁用
+  void (*alarm_handler)();            // 用户态 handler函数指针
+  int alarm_ticks;                    // 距离下次触发还剩多少 tick
+  struct trapframe *alarm_trapframe;  // 保存中断前的完整寄存器现场
+  int alarm_goingoff;                 // handler 是否正在执行（1=是，防止重入）
+  
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
