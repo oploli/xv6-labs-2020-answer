@@ -65,7 +65,15 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  } else if(r_scause() == 15) {
+    uint64 va = r_stval();
+  	
+    if(cowhandler(va) == -1) {
+      printf("usertrap(): cowhandler failed\n");
+      setkilled(p);
+    }
+  }
+  else if((which_dev = devintr()) != 0){
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
@@ -219,3 +227,53 @@ devintr()
   }
 }
 
+// 处理COW页错误
+int
+cowhandler(uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *mem;
+  struct proc *p = myproc();
+
+  if(va >= p->sz || va < PGSIZE)
+    return -1;
+  
+  pte = walk(p->pagetable, va, 0);
+  if(pte == 0)
+    return -1;
+  if((*pte & PTE_V) == 0)
+    return -1;
+  if((*pte & PTE_COW) == 0)
+    return -1;
+  
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+  
+  // 获取当前引用计数
+  int ref = kgetref(pa);
+  
+  if(ref > 1) {
+    // 有其他进程共享这个页
+    mem = kalloc();
+    if(mem == 0)
+      return -1;
+    
+    // 复制旧页到新页
+    memmove(mem, (char*)pa, PGSIZE);
+    
+    // 减少引用计数
+    kfree((void*)pa);
+    
+    // 设置新页:清除COW标志,恢复写权限
+    flags = (flags & ~PTE_COW) | PTE_W;
+    *pte = PA2PTE((uint64)mem) | flags;
+    
+  } else {
+    flags = (flags & ~PTE_COW) | PTE_W;
+    *pte = PA2PTE(pa) | flags;
+  }
+  
+  return 0;
+}

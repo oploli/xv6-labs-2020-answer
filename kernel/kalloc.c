@@ -23,10 +23,16 @@ struct {
   struct run *freelist;
 } kmem;
 
+// 跟踪每个物理页被多少个进程引用
+int pg_ref_cnt[PHYSTOP / PGSIZE + 10];
+struct spinlock reflock;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  // 初始化引用计数锁
+  initlock(&reflock, "reflock");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -35,8 +41,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+    pg_ref_cnt[(uint64)p / PGSIZE] = 1;
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -50,6 +58,16 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  acquire(&reflock);
+  pg_ref_cnt[(uint64)pa / PGSIZE]--;
+  
+  // 如果还有其他进程引用这个页面,不能真正释放
+  if(pg_ref_cnt[(uint64)pa / PGSIZE] > 0) {
+    release(&reflock);
+    return;
+  }
+  release(&reflock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -76,7 +94,39 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    acquire(&reflock);
+    pg_ref_cnt[(uint64)r / PGSIZE] = 1;
+    release(&reflock);
+  }
   return (void*)r;
+}
+
+// 增加物理页引用计数
+// 在fork时共享页面调用
+void
+kaddref(uint64 pa)
+{
+  if(pa < (uint64)end || pa >= PHYSTOP)
+    panic("kaddref: invalid pa");
+  
+  acquire(&reflock);
+  pg_ref_cnt[pa / PGSIZE]++;
+  release(&reflock);
+}
+
+// 获取物理页引用计数
+int
+kgetref(uint64 pa)
+{
+  int ref;
+  
+  if(pa < (uint64)end || pa >= PHYSTOP)
+    panic("kgetref: invalid pa");
+  
+  acquire(&reflock);
+  ref = pg_ref_cnt[pa / PGSIZE];
+  release(&reflock);
+  return ref;
 }
