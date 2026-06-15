@@ -26,48 +26,49 @@ now()
  return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
 
-static void 
-insert(int key, int value, struct entry **p, struct entry *n)
-{
-  struct entry *e = malloc(sizeof(struct entry));
-  e->key = key;
-  e->value = value;
-  e->next = n;
-  *p = e;
-}
-
 static 
 void put(int key, int value)
 {
   int i = key % NBUCKET;
 
-  pthread_mutex_lock(&lock[i]);
-  
   // is the key already present?
   struct entry *e = 0;
+  pthread_mutex_lock(&lock[i]);
   for (e = table[i]; e != 0; e = e->next) {
     if (e->key == key)
       break;
   }
+  
   if(e){
     // update the existing key.
     e->value = value;
+    pthread_mutex_unlock(&lock[i]);
   } else {
     // the new is new.
-    insert(key, value, &table[i], table[i]);
+    // 分配新节点（在持有锁时）
+    struct entry *new_entry = malloc(sizeof(struct entry));
+    new_entry->key = key;
+    new_entry->value = value;
+    new_entry->next = table[i];
+    table[i] = new_entry;
+    pthread_mutex_unlock(&lock[i]);
   }
-  
-  pthread_mutex_unlock(&lock[i]);
 }
 
 static struct entry*
 get(int key)
 {
   int i = key % NBUCKET;
+
+  pthread_mutex_lock(&lock[i]);
+  
   struct entry *e = 0;
   for (e = table[i]; e != 0; e = e->next) {
     if (e->key == key) break;
   }
+  
+  pthread_mutex_unlock(&lock[i]);
+  
   return e;
 }
 

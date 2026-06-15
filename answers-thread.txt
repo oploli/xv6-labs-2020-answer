@@ -1,0 +1,55 @@
+# xv6 Thread Lab Answers
+
+## 1. Uthread
+
+### Q: Explain why the thread_switch function needs to save and restore registers.
+A: Thread switching needs to save and restore registers because each thread maintains its own execution context. When switching from one thread to another, we must preserve the current thread's state (all registers) so it can resume later from exactly where it left off. The saved registers include:
+- ra (return address): where the thread will resume execution
+- sp (stack pointer): the thread's stack location
+- s0-s11 (callee-saved registers): preserved across function calls according to RISC-V calling convention
+
+### Q: Explain how thread_create sets up a new thread's stack.
+A: thread_create sets up a new thread by:
+1. Finding a FREE thread slot in the all_thread array
+2. Setting its state to RUNNABLE
+3. Initializing the thread's context array:
+   - context[0] (ra): set to the thread function address so thread_switch returns to it
+   - context[1] (sp): set to the top of the thread's stack (stack grows downward)
+   - Other registers initialized to 0
+
+## 2. Using threads
+
+### Q: Explain why the original ph.c has race conditions.
+A: The original ph.c has race conditions because multiple threads can access and modify the hash table simultaneously without synchronization. Specifically:
+- Multiple threads can insert into the same bucket concurrently
+- The table[i] pointer can be updated by one thread while another is reading it
+- Memory allocation and linked list manipulation are not atomic
+- This can cause lost updates, corrupted linked lists, and memory leaks
+
+### Q: Explain why adding a single lock for the entire table eliminates race conditions but limits parallelism.
+A: A single global lock eliminates race conditions by serializing all access to the hash table. However, it limits parallelism because:
+- Only one thread can access any bucket at a time
+- Threads operating on different buckets must still wait for each other
+- The hash table becomes a bottleneck despite having independent buckets
+
+### Q: Explain why having a separate lock for each bucket allows parallelism.
+A: Separate locks per bucket allow parallelism because:
+- Threads operating on different buckets can proceed concurrently
+- Only threads accessing the same bucket need to wait for each other
+- With a good hash function, keys are evenly distributed, minimizing contention
+- This provides both correctness (no race conditions) and performance (parallel access)
+
+## 3. Barrier
+
+### Q: Explain the purpose of the barrier synchronization primitive.
+A: A barrier ensures that all threads reach a certain point in execution before any of them can proceed. This is useful for:
+- Phased parallel algorithms where each phase depends on the previous phase
+- Ensuring all threads complete their work before moving to the next iteration
+- Synchronizing threads at specific points in the computation
+
+### Q: Explain why we use pthread_cond_wait instead of a simple spin-wait loop.
+A: pthread_cond_wait is better than spin-waiting because:
+- It puts the thread to sleep instead of busy-waiting, saving CPU cycles
+- The scheduler can use the CPU for other work while the thread waits
+- It properly handles the mutex, automatically releasing it while waiting and re-acquiring it on wakeup
+- Spin-waiting wastes CPU cycles and can cause cache contention

@@ -14,6 +14,7 @@
 struct thread {
   char       stack[STACK_SIZE]; /* the thread's stack */
   int        state;             /* FREE, RUNNING, RUNNABLE */
+  uint64     context[12];       /* saved registers: ra, sp, s0-s11 */
 };
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
@@ -60,6 +61,7 @@ thread_schedule(void)
      * Invoke thread_switch to switch from t to next_thread:
      * thread_switch(??, ??);
      */
+    thread_switch((uint64)&t->context, (uint64)&next_thread->context);
   } else
     next_thread = 0;
 }
@@ -74,6 +76,29 @@ thread_create(void (*func)())
   }
   t->state = RUNNABLE;
   // YOUR CODE HERE
+  // Set up the thread's stack so that when thread_switch() returns,
+  // it will return to func() with a simulated call from the top of
+  // the stack.
+  // 
+  // We need to:
+  // 1. Set the stack pointer to the top of the thread's stack
+  // 2. Set the return address (ra) to func
+  // 3. All other registers can be 0
+  
+  // Calculate the top of the stack (stack grows downward)
+  uint64 sp = (uint64)&t->stack[STACK_SIZE];
+  
+  // Set up the context
+  // sp points to the top of the stack
+  t->context[1] = sp;  // sp
+  
+  // Set ra to func - this is where thread_switch will return to
+  t->context[0] = (uint64)func;  // ra
+  
+  // Initialize other registers to 0
+  for(int i = 2; i < 12; i++) {
+    t->context[i] = 0;
+  }
 }
 
 void 
