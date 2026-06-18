@@ -244,7 +244,9 @@ endif
 
 ifeq ($(LAB),fs)
 UPROGS += \
-	$U/_bigfile
+	$U/_bigfile \
+	$U/_symlink \
+	$U/_symlinktest
 endif
 
 
@@ -288,7 +290,7 @@ endif
 
 FWDPORT = $(shell expr `id -u` % 5000 + 25999)
 
-QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 128M -smp $(CPUS) -nographic
+QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 1G -smp $(CPUS) -nographic
 QEMUOPTS += -global virtio-mmio.force-legacy=false
 QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x0
 QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
