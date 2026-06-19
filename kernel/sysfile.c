@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -502,4 +503,221 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+
+// ============================================================
+// mmap / munmap  (Lab: mmap)
+// ============================================================
+
+// Find the VMA (if any) whose range covers virtual address va.
+static struct vmarea*
+vma_find(struct proc *p, uint64 va)
+{
+  for(int i = 0; i < NVMA; i++){
+    struct vmarea *v = &p->vmas[i];
+    if(v->addr != 0 && va >= v->addr && va < v->addr + v->len)
+      return v;
+  }
+  return 0;
+}
+
+// Write one mapped page back to its file (MAP_SHARED only).
+// Only the bytes that fall inside the file are written, so the
+// mapping never extends the file.
+static void
+vma_writeback(struct vmarea *v, uint64 pa, uint64 off)
+{
+  struct inode *ip = v->f->ip;
+  uint n;
+
+  ilock(ip);
+  if(off >= ip->size){
+    iunlock(ip);
+    return;
+  }
+  n = (off + PGSIZE > ip->size) ? ip->size - off : PGSIZE;
+  iunlock(ip);
+
+  begin_op();
+  ilock(ip);
+  writei(ip, 0, pa, off, n);
+  iunlock(ip);
+  end_op();
+}
+
+// Remove the mappings for [start, start+len) (page-aligned),
+// writing back dirty MAP_SHARED pages.  A VMA whose whole region
+// has been unmapped has its file closed and its slot freed.
+static void
+vma_do_unmap(struct proc *p, uint64 start, uint64 len)
+{
+  uint64 s = PGROUNDDOWN(start);
+  uint64 e = PGROUNDUP(start + len);
+
+  for(int i = 0; i < NVMA; i++){
+    struct vmarea *v = &p->vmas[i];
+    if(v->addr == 0)
+      continue;
+    uint64 is = (s > v->addr) ? s : v->addr;
+    uint64 ie = (e < v->addr + v->len) ? e : (v->addr + v->len);
+    if(is >= ie)
+      continue;                       // no overlap with this VMA
+
+    int fully = (s <= v->addr && e >= v->addr + v->len);
+
+    for(uint64 a = is; a < ie; a += PGSIZE){
+      pte_t *pte = walk(p->pagetable, a, 0);
+      if(pte == 0 || (*pte & PTE_V) == 0)
+        continue;                     // page was never faulted in
+      uint64 pa = PTE2PA(*pte);
+      if((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE))
+        vma_writeback(v, pa, v->offset + (a - v->addr));
+      kfree((void*)pa);
+      *pte = 0;
+    }
+
+    if(fully){
+      fileclose(v->f);
+      v->addr = 0;
+      v->f = 0;
+      v->len = 0;
+    }
+  }
+}
+
+// Handle a page fault inside an mmap region: lazily allocate the
+// page, fill it from the file, and map it.  Returns 0 on success,
+// -1 if va is not within any VMA or allocation fails.
+int
+mmap_fault(uint64 va)
+{
+  struct proc *p = myproc();
+  struct vmarea *v;
+  char *mem;
+  int perm;
+
+  if((v = vma_find(p, va)) == 0)
+    return -1;
+
+  va = PGROUNDDOWN(va);
+  if((mem = kalloc()) == 0)
+    return -1;
+  memset(mem, 0, PGSIZE);            // bytes past EOF must read as zero
+
+  ilock(v->f->ip);
+  readi(v->f->ip, 0, (uint64)mem, v->offset + (va - v->addr), PGSIZE);
+  iunlock(v->f->ip);
+
+  perm = PTE_U;
+  if(v->prot & PROT_READ)  perm |= PTE_R;
+  if(v->prot & PROT_WRITE) perm |= PTE_W;
+  if(v->prot & PROT_EXEC)  perm |= PTE_X;
+
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) != 0){
+    kfree(mem);
+    return -1;
+  }
+  return 0;
+}
+
+// sys_mmap: record a (lazily realised) file mapping.  The kernel
+// chooses the virtual address, growing downward from TRAPFRAME.
+uint64
+sys_mmap(void)
+{
+  uint64 addr, len, offset;
+  int prot, flags, fd;
+  struct file *f;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argaddr(5, &offset);
+
+  if(len == 0)
+    return (uint64)-1;
+  if(fd < 0 || fd >= NOFILE || (f = p->ofile[fd]) == 0)
+    return (uint64)-1;
+  // a shared, writable mapping requires a writable file
+  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && !f->writable)
+    return (uint64)-1;
+
+  struct vmarea *v = 0;
+  for(int i = 0; i < NVMA; i++)
+    if(p->vmas[i].addr == 0){ v = &p->vmas[i]; break; }
+  if(v == 0)
+    return (uint64)-1;
+
+  uint64 alen = PGROUNDUP(len);
+  uint64 base = TRAPFRAME;
+  for(int i = 0; i < NVMA; i++)
+    if(p->vmas[i].addr != 0 && p->vmas[i].addr < base)
+      base = p->vmas[i].addr;
+  uint64 va = base - alen;
+  if(va <= p->sz)                     // keep clear of the heap
+    return (uint64)-1;
+
+  v->addr   = va;
+  v->len    = alen;
+  v->prot   = prot;
+  v->flags  = flags;
+  v->offset = offset;
+  v->f      = filedup(f);            // survive close(fd)
+
+  return va;
+}
+
+// sys_munmap: remove (part of) a mapping, writing back dirty pages.
+uint64
+sys_munmap(void)
+{
+  uint64 addr, len;
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  if(len == 0)
+    return 0;
+  vma_do_unmap(myproc(), addr, len);
+  return 0;
+}
+
+// Copy a parent's VMAs into a freshly forked child, giving the
+// child its own file reference for each mapping.
+void
+vma_fork(struct proc *parent, struct proc *child)
+{
+  for(int i = 0; i < NVMA; i++){
+    child->vmas[i] = parent->vmas[i];
+    if(child->vmas[i].addr != 0)
+      child->vmas[i].f = filedup(parent->vmas[i].f);
+  }
+}
+
+// Remove every mapping of a process (called from exit): write back
+// dirty shared pages, free physical pages, and close the files.
+void
+vma_exit(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    struct vmarea *v = &p->vmas[i];
+    if(v->addr == 0)
+      continue;
+    for(uint64 a = v->addr; a < v->addr + v->len; a += PGSIZE){
+      pte_t *pte = walk(p->pagetable, a, 0);
+      if(pte && (*pte & PTE_V)){
+        uint64 pa = PTE2PA(*pte);
+        if((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE))
+          vma_writeback(v, pa, v->offset + (a - v->addr));
+        kfree((void*)pa);
+        *pte = 0;
+      }
+    }
+    fileclose(v->f);
+    v->addr = 0;
+    v->f = 0;
+    v->len = 0;
+  }
 }

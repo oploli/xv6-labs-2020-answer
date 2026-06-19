@@ -37,6 +37,10 @@ int             exec(char*, char**);
 struct file*    filealloc(void);
 void            fileclose(struct file*);
 struct file*    filedup(struct file*);
+// mmap support (sysfile.c)
+int             mmap_fault(uint64);
+void            vma_fork(struct proc*, struct proc*);
+void            vma_exit(struct proc*);
 void            fileinit(void);
 int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);

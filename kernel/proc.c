@@ -155,6 +155,15 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  // release any mmap file references left over (e.g. on fork failure)
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].addr != 0){
+      fileclose(p->vmas[i].f);
+      p->vmas[i].addr = 0;
+      p->vmas[i].f = 0;
+      p->vmas[i].len = 0;
+    }
+  }
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
@@ -308,6 +317,9 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // copy mmap'd regions so the child sees the same mappings (lazily)
+  vma_fork(p, np);
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -350,6 +362,9 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Write back dirty pages and remove any mmap'd regions.
+  vma_exit(p);
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
