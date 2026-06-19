@@ -41,14 +41,37 @@ sys_wait(void)
 uint64
 sys_sbrk(void)
 {
-  int addr;
+  uint64 addr;
   int n;
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
-  if(growproc(n) < 0)
+
+  struct proc *p = myproc();
+  addr = p->sz;
+
+  // lab5 (lazy allocation): grow the address space lazily.
+  // Just record the new size; do NOT allocate physical memory yet.
+  // Pages are allocated on demand by the page-fault handler when the
+  // process first touches them.
+  uint64 newsz;
+  if(n >= 0)
+    newsz = addr + (uint64)n;
+  else
+    newsz = addr - (uint64)(-n);
+
+  if(n >= 0 && newsz < addr)   // wrapped past the top of the address space
     return -1;
+  if(n < 0 && newsz > addr)    // would shrink below 0
+    return -1;
+  if(newsz >= MAXVA)           // beyond the maximum user virtual address
+    return -1;
+
+  // For a shrink, actually free the physical pages that are released.
+  if(n < 0)
+    p->sz = uvmdealloc(p->pagetable, addr, newsz);
+  else
+    p->sz = newsz;
   return addr;
 }
 

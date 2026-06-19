@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"   // lab5 (lazy): for myproc() in lazyalloc()/walkaddr()
 
 /*
  * the kernel's page table.
@@ -88,6 +90,42 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   return &pagetable[PX(0, va)];
 }
 
+// lab5 (lazy allocation): allocate a physical page for `va` on demand.
+// Only acts on the current process's own page table, and only for
+// addresses inside its lazily-grown region [0, p->sz). Returns 0 on
+// success (page now mapped), -1 otherwise.
+int
+lazyalloc(pagetable_t pagetable, uint64 va)
+{
+  struct proc *p = myproc();
+  if(p == 0 || pagetable != p->pagetable)
+    return -1;
+  if(va >= p->sz || va >= MAXVA)
+    return -1;
+
+  uint64 va0 = PGROUNDDOWN(va);
+
+  // If the page is already present (e.g. the stack guard page, or a
+  // permission fault on a read-only page), this is a genuine fault and
+  // NOT a lazy miss: refuse so the caller kills the process instead of
+  // panicking in mappages() with "remap".
+  pte_t *pte = walk(pagetable, va0, 0);
+  if(pte != 0 && (*pte & PTE_V))
+    return -1;
+
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;
+  memset(mem, 0, PGSIZE);
+
+  if(mappages(pagetable, va0, PGSIZE, (uint64)mem,
+              PTE_W | PTE_R | PTE_X | PTE_U) != 0){
+    kfree(mem);
+    return -1;
+  }
+  return 0;
+}
+
 // Look up a virtual address, return the physical address,
 // or 0 if not mapped.
 // Can only be used to look up user pages.
@@ -103,8 +141,17 @@ walkaddr(pagetable_t pagetable, uint64 va)
   pte = walk(pagetable, va, 0);
   if(pte == 0)
     return 0;
-  if((*pte & PTE_V) == 0)
-    return 0;
+  if((*pte & PTE_V) == 0){
+    // lab5 (lazy): the page is not present yet. If this address belongs
+    // to the current process's lazy region, allocate it now and re-walk.
+    // This lets copyin/copyout/copyinstr (which run in kernel mode and
+    // therefore never take a user page-fault trap) see lazy pages.
+    if(lazyalloc(pagetable, va) < 0)
+      return 0;
+    pte = walk(pagetable, va, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      return 0;
+  }
   if((*pte & PTE_U) == 0)
     return 0;
   pa = PTE2PA(*pte);
@@ -181,9 +228,9 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue;   // lab5 (lazy): page-table entry not allocated
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;   // lab5 (lazy): page not present (lazy), skip it
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -315,9 +362,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;   // lab5 (lazy): page-table entry not allocated
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;   // lab5 (lazy): page not present (lazy), skip it
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
